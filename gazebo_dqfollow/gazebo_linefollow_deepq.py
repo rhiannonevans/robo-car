@@ -56,8 +56,8 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
 
         # Setup the environment
         self._seed()
-        self.action_space = spaces.Discrete(6) # F, L , R
-        self.observation_space = spaces.Discrete(10)
+        self.action_space = spaces.Discrete(3) # F, L , R
+        self.observation_space = spaces.Discrete(3)
 
         # State
         self.current_vel = 0
@@ -65,6 +65,9 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
 
         # Round state to decrease state space size
         self.num_dec_places = 2
+
+        # record the previous line state observation (initially set to 'line straight ahead')
+        self.remeber = [0,1,0]
 
     def process_image(self, data):
         '''
@@ -82,8 +85,8 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
 
         # cv2.imshow("raw", cv_image)
 
-        NUM_BINS = 10
-        state = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        #NUM_BINS = 10
+        state = [0, 0, 0]
         done = False
 
         colour_drop = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
@@ -101,59 +104,43 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
         top_idx = 200
         bottom_idx = height
 
-        span_0 = [0, int(width / NUM_BINS)]
-        span_1 = [int(width / NUM_BINS), int(2 * width / NUM_BINS)]
-        span_2 = [int(2 * width / NUM_BINS), int(3 * width / NUM_BINS)]
-        span_3 = [int(3 * width / NUM_BINS), int(4 * width / NUM_BINS)]
-        span_4 = [int(4 * width / NUM_BINS), int(5 * width / NUM_BINS)]
-        span_5 = [int(5 * width / NUM_BINS), int(6 * width / NUM_BINS)]
-        span_6 = [int(6 * width / NUM_BINS), int(7 * width / NUM_BINS)]
-        span_7 = [int(7 * width / NUM_BINS), int(8 * width / NUM_BINS)]
-        span_8 = [int(8 * width / NUM_BINS), int(9 * width / NUM_BINS)]
-        span_9 = [int(9 * width / NUM_BINS), width]
+        left_view = [0, int(2*(width/5))] # left two fifths of view
+        mid_view = [int(width/5),int(4*width/5)]# middle fifth of view
+        right_view = [int(4*width/5), width] # right two fifths of view
 
-        spans = np.stack([span_0, span_1, span_2, span_3, span_4, span_5, span_6, span_7, span_8, span_9])
+        views = np.stack([left_view,mid_view,right_view])
 
-        skew_0 = np.mean(np.array([gray[top_idx:bottom_idx, span_0]]))
-        skew_1 = np.mean(np.array([gray[top_idx:bottom_idx, span_1]]))
-        skew_2 = np.mean(np.array([gray[top_idx:bottom_idx, span_2]]))
-        skew_3 = np.mean(np.array([gray[top_idx:bottom_idx, span_3]]))
-        skew_4 = np.mean(np.array([gray[top_idx:bottom_idx, span_4]]))
-        skew_5 = np.mean(np.array([gray[top_idx:bottom_idx, span_5]]))
-        skew_6 = np.mean(np.array([gray[top_idx:bottom_idx, span_6]]))
-        skew_7 = np.mean(np.array([gray[top_idx:bottom_idx, span_7]]))
-        skew_8 = np.mean(np.array([gray[top_idx:bottom_idx, span_8]]))
-        skew_9 = np.mean(np.array([gray[top_idx:bottom_idx, span_9]]))
+        lt = np.mean(np.array(gray[left_view[0] : left_view[1],top_idx:bottom_idx])) # LEFT TURN
+        nt = np.mean(np.array(np.array(gray[mid_view[0] : mid_view[1],top_idx:bottom_idx])))  # NO TURN
+        rt = np.mean(np.array(np.array(gray[right_view[0] : right_view[1],top_idx:bottom_idx]))) # RIGTH TURN
 
-        all_skew = [skew_0, skew_1, skew_2, skew_3, skew_4, skew_5, skew_6, skew_7, skew_8, skew_9]
-        min_skew = min(all_skew)
-        print(min_skew)
+        turns = [lt,nt,rt]
+        path = min(turns)
+        print(path)
 
         s = 0
 
-        roam_penalty = 0
 
-        if min_skew < 255:
+
+        if path < 255:
             self.timeout = 0
-            if all_skew.count(min_skew) > 1:
-                state = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0]
-                s = 4
-
+            if turns.count(path) > 1:
+                turns = self.rollback # if no clear path is found, assume previous valid line state
             else:
-                s = all_skew.index(min_skew)
-                state[s] = 1
+                s = turns.index(path)
+                state[s] = 1 # set state
+                self.rollback = turns # update rollback with new valid state
         else:
             self.timeout += 1
-            roam_penalty += -10*self.timeout # enforce an additional reward penalty if the car is off line, scales with time off line
             print("timeout")
-            if self.timeout == 30:
+            if self.timeout == 50:
                 done = True
 
         print(state)
-        cv2.circle(cv_image, (spans[s, 0], 200), 20, [0, 255, 0], -1)
+        #cv2.circle(cv_image, (views[s, 0], 200), 20, [0, 255, 0], -1)
 
         print("*** DONE PROCESSING IMAGE ***")
-        return state, done, cv_image, roam_penalty
+        return state, done, cv_image
 
     def callback(self, data):
         self.data = data
@@ -166,24 +153,16 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
         print("===== STEPPING =====")
 
         vel_cmd = Twist()
-        if action == 0:  # FORWARD
-            vel_cmd.linear.x = 0.8
-            vel_cmd.angular.z = 0.0
-        elif action == 1:  #HARD LEFT
-            vel_cmd.linear.x = 0.6
-            vel_cmd.angular.z = 1.2
-        elif action == 2: # SOFT LEFT
+        if action == 0:  # LEFT TURN
+            vel_cmd.linear.x = 0
+            vel_cmd.angular.z = 0.5
+        elif action == 1:  # FORWARD
             vel_cmd.linear.x = 0.5
-            vel_cmd.angular.z = 0.6
-        elif action == 3:  # HARD RIGHT
-            vel_cmd.linear.x = 0.6
-            vel_cmd.angular.z = -1.2
-        elif action == 4: # SOFT RIGHT
-            vel_cmd.linear.x = 0.5
-            vel_cmd.angular.z = -0.6
-        elif action == 5: # Gentle Roll
-            vel_cmd.linear.x = 0.3
             vel_cmd.angular.z = 0
+        elif action == 2: # RIGHT TURN
+            vel_cmd.linear.x = 0
+            vel_cmd.angular.z = -0.5
+
 
         # Unpause simulation to make observations
         rospy.wait_for_service('/gazebo/unpause_physics')
@@ -211,71 +190,31 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
         except (rospy.ServiceException) as e:
             print ("/gazebo/unpause_physics service call failed")
 
-        state, done, image, roam_penalty = self.process_image(data)
+        state, done, image = self.process_image(data)
 
-        mid_state = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0]
-        mid_state2 = [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]
-
-        far_left = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        far_left2 = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
-        mid_left1 = [0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
-        mid_left2 = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
-
-        far_right = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
-        far_right2 = [0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
-        mid_right1 = [0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
-        mid_right2 = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+        left = [1,0,0]
+        mid = [0,1,0]
+        right = [0,0,1]
 
         # Set the rewards for your action
         if not done:
-            if action == 0:  # FORWARD
-                if state == mid_state or state == mid_state2:
-                    reward = 20
-                else:
-                    reward = 1
-            elif action == 1:  #  HARD LEFT
-                if state == far_left or state == far_left2:
-                    reward = 20
-                elif state == far_right or state == far_right2:
-                    reward = -40
-                elif state == mid_left1 or state == mid_left2:
-                    reward = 2
-                elif state == mid_right1 or state == mid_right2:
-                    reward = 0
-                else:
-                    reward = 5
-            elif action == 2: # SOFT LEFT
-                if state == mid_state or state == mid_state2:
-                    reward = 3
-                elif state == mid_left1 or state == mid_left2:
-                    reward = 20
+            if action == 0:  # CHOSE LEFT TURN
+                if state == left:
+                    reward = 500
                 else:
                     reward = 0
-            elif action == 3: # HARD RIGHT
-                if state == far_right or state == far_right2:
-                    reward = 40
-                elif state == mid_right1 or state == mid_right2:
-                    reward = 2
-                elif state==far_left or far_left2:
-                    reward=-40
+            elif action == 1: # CHOSE FORWARD
+                if state == mid:
+                    reward = 500
                 else:
                     reward = 0
-            elif action == 4: #SOFT RIGHT
-                if state == mid_state or state == mid_state2:
-                    reward = 3
-                elif state == mid_right1 or state == mid_right2:
-                    reward = 20
+            else:
+                if state == right:
+                    reward = 500
                 else:
                     reward = 0
-            elif action == 5: # GENTLE ROLL
-                if state == far_left or state == far_right:
-                    reward = 5
-                else:
-                    reward = -5
         else:
-            reward = 1
-    
-        reward += roam_penalty
+            reward = -500
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_size = 0.6
@@ -285,10 +224,10 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
         cv2.waitKey(1)
         print("===== DONE STEPPING =====")
 
-        self.runtime += 1
+        #self.runtime += 1
 
-        if self.runtime > 1000:
-            done = True
+        #if self.runtime > 1000:
+           # done = True
 
         return state, reward, done, {}
 
@@ -330,7 +269,7 @@ class GazeboDeepQLineEnv(gazebo_env.GazeboEnv):
 
         self.timeout = 0
         self.runtime = 0
-        state, done, image, roam = self.process_image(data)
+        state, done, image = self.process_image(data)
 
         print("====== DONE RESETTING =======")
 
